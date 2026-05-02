@@ -1,0 +1,2 @@
+This project focuses on real-time detection and tracking of irregular moving objects using deep learning techniques. It is designed for applications like autonomous driving, intelligent surveillance, and traffic monitoring.
+The system uses a Faster R-CNN model with a ResNet-50 backbone to accurately detect and track objects under challenging conditions such as lighting changes, occlusion, and shape variations.
