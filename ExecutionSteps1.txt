@@ -1,0 +1,851 @@
+###### &#x20;                                   **PROJECT TITLE: Detect Irregular Moving objects based on color and shape in Real-Time**
+
+&#x20;                                                                                                                                      DEPARTMENT: Computer Science and Engineering
+
+
+
+**1. SYSTEM REQUIREMENTS:**
+
+
+
+\- Hardware: Dedicated or integrated GPU Laptop.
+
+\- Software: Anaconda Distribution (Python 3.10).
+
+\- External: Android Device with "IP Webcam" application installed.
+
+
+
+
+
+**2. ENVIRONMENT SETUP (ANACONDA):**
+
+
+
+Open Anaconda Prompt and execute the following commands in order:
+
+
+
+&#x20; a) Create a new virtual environment:
+
+&#x20;       conda create -n capstone\_project python=3.10 -y
+
+
+
+&#x20; b) Activate the environment:
+
+&#x20;       conda activate capstone\_project
+
+
+
+&#x20; c) Install Core Machine Learning Libraries:
+
+&#x20;       pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+
+
+
+&#x20; # Note: the model is already converted to OPENVINO Format and available in the folder uploaded
+
+&#x20; d) Install OpenVINO \& Optimization Tools: \[Execute this if want to convert the model into openVINO format]
+
+&#x20;       pip install openvino onnx onnxscript or pip install openvino opencv-python
+
+
+
+&#x20; e) Install Image Processing \& Video Tools:
+
+&#x20;       pip install opencv-python Pillow numpy
+
+
+
+
+
+**3. MODEL CONVERSION (PYTORCH TO OPENVINO):** \[Ignore this step, As this conversion is already done and files are available in the uploaded folder]
+
+
+
+Before running the live demo, the PyTorch (.pth) model must be converted to OpenVINO Intermediate Representation (.xml/.bin) for CPU acceleration.
+
+
+
+&#x20; Step: Run the conversion script:
+
+&#x20;        python convert\_direct.py (replace with model file name)
+
+
+
+Expected Output: '✅ SUCCESS! Created faster\_rcnn\_openvino.xml'
+
+
+
+**4. LIVE DEMO EXECUTION STEPS:**
+
+
+
+&#x20; (**Note:** Mobile device and Laptop should use the same internet connection)
+
+
+
+&#x20; a) Start the 'IP Webcam' app on your Android device.
+
+
+
+&#x20; b) Click 'Start Server' and note the IPv4 Address (e.g., http://192.168.1.10:8080).
+
+
+
+&#x20; c) Open 'test.py' in a text editor and update the VIDEO\_SOURCE variable with your specific IP address.
+
+
+
+&#x20; d) In the Anaconda Prompt, run the script:
+
+&#x20;            python test.py
+
+
+
+&#x20; e) Make sure to point the device camera at the traffic scenario and the same would be displayed in the laptop screen with detection.
+
+
+
+**5. PROJECT LOGIC \& OPTIMIZATIONS:**
+
+
+
+\- Architecture: Faster R-CNN with ResNet50-FPN backbone.
+
+
+
+\- Classes: 10 Traffic Classes (Car, Bus, Person, Bike, Truck, Motor, Train,
+
+
+
+&#x20; Rider, Traffic Sign, Traffic Light).
+
+
+
+\- Optimization: Intel OpenVINO Inference Engine.
+
+
+
+\- Synchronization: Implemented a Multi-Threaded Asynchronous pipeline to
+
+
+
+&#x20; decouple camera frames from AI inference, ensuring \~30 FPS video fluidity
+
+
+
+&#x20; with real-time bounding box updates.
+
+
+
+**6. SUPPORTING FILES DESCRIPTION:**
+
+
+
+\- fasterrcnn\_curriculum\_final.pth: Custom trained weights on BDD100K dataset.
+
+
+
+\- faster\_rcnn\_openvino.xml/bin: Optimized model files for high-speed CPU inference.
+
+
+
+\- test.py: Main application script featuring zero-latency buffer flushing and synchronized frame-result bundling.
+
+
+
+**7. Working Code for live demo (test.py):**
+
+
+
+import cv2
+
+import numpy as np
+
+import threading
+
+import time
+
+import openvino as ov
+
+
+
+\# --- CONFIG ---
+
+MODEL\_XML = "faster\_rcnn\_openvino.xml"
+
+VIDEO\_SOURCE = "http://192.168.29.175:8080/video"
+
+CONF\_THRESH = 0.55 
+
+
+
+\# SPEED OPTIMIZATION: 384x216 reduces math load by 20% compared to 416
+
+AI\_W, AI\_H = 384, 216 
+
+
+
+CLASS\_NAMES = {1:'car',2:'bus',3:'person',4:'bike',5:'truck',6:'motor',7:'train',8:'rider',9:'traffic sign',10:'traffic light'}
+
+
+
+class PerfectSyncApp:
+
+&#x20;   def \_\_init\_\_(self):
+
+&#x20;       print("--- Initializing Zero-Latency Engine ---")
+
+&#x20;       core = ov.Core()
+
+&#x20;       model = core.read\_model(MODEL\_XML)
+
+&#x20;       
+
+&#x20;       # We use LATENCY hint to make the CPU finish boxes as fast as possible
+
+&#x20;       self.compiled\_model = core.compile\_model(model, "CPU", {
+
+&#x20;           "PERFORMANCE\_HINT": "LATENCY",
+
+&#x20;           "CACHE\_DIR": "./cache" # Speeds up subsequent startups
+
+&#x20;       })
+
+&#x20;       self.infer\_request = self.compiled\_model.create\_infer\_request()
+
+&#x20;       
+
+&#x20;       self.cap = cv2.VideoCapture(VIDEO\_SOURCE)
+
+&#x20;       # Force the camera to not buffer old frames
+
+&#x20;       self.cap.set(cv2.CAP\_PROP\_BUFFERSIZE, 1)
+
+
+
+&#x20;       self.live\_frame = None
+
+&#x20;       self.latest\_boxes = None
+
+&#x20;       self.running = True
+
+
+
+&#x20;   def capture\_thread(self):
+
+&#x20;       """ 
+
+&#x20;       High-speed capture thread. 
+
+&#x20;       It 'grabs' frames and only 'retrieves' the very last one 
+
+&#x20;       to ensure we never show old buffered video.
+
+&#x20;       """
+
+&#x20;       while self.running:
+
+&#x20;           # Clear the internal buffer to get the 'Real-Present' frame
+
+&#x20;           for \_ in range(2): 
+
+&#x20;               self.cap.grab()
+
+&#x20;           ret, frame = self.cap.retrieve()
+
+&#x20;           
+
+&#x20;           if ret:
+
+&#x20;               self.live\_frame = frame
+
+&#x20;           else:
+
+&#x20;               time.sleep(0.01)
+
+
+
+&#x20;   def ai\_thread(self):
+
+&#x20;       """ 
+
+&#x20;       Inference thread: Grabs the absolute latest frame 
+
+&#x20;       the moment the CPU is ready for new math.
+
+&#x20;       """
+
+&#x20;       while self.running:
+
+&#x20;           if self.live\_frame is not None:
+
+&#x20;               # 1. Take the absolute current frame
+
+&#x20;               raw\_img = self.live\_frame
+
+&#x20;               h\_orig, w\_orig = raw\_img.shape\[:2]
+
+&#x20;               
+
+&#x20;               # 2. Pre-process (Fast resize)
+
+&#x20;               img = cv2.resize(raw\_img, (AI\_W, AI\_H), interpolation=cv2.INTER\_LINEAR)
+
+&#x20;               img = cv2.cvtColor(img, cv2.COLOR\_BGR2RGB)
+
+&#x20;               img = img.transpose(2, 0, 1)
+
+&#x20;               input\_tensor = np.expand\_dims(img, axis=0).astype(np.float32) / 255.0
+
+
+
+&#x20;               # 3. Start Inference
+
+&#x20;               self.infer\_request.infer({0: input\_tensor})
+
+&#x20;               
+
+&#x20;               # 4. Extract results
+
+&#x20;               results = self.infer\_request.get\_output\_tensor(0).data # boxes
+
+&#x20;               labels = self.infer\_request.get\_output\_tensor(1).data # labels
+
+&#x20;               scores = self.infer\_request.get\_output\_tensor(2).data # scores
+
+&#x20;               
+
+&#x20;               # 5. Store with current scale
+
+&#x20;               self.latest\_boxes = (results, labels, scores, w\_orig/AI\_W, h\_orig/AI\_H)
+
+&#x20;           
+
+&#x20;           # This sleep is tiny to ensure maximum AI cycles
+
+&#x20;           time.sleep(0.001)
+
+
+
+&#x20;   def run(self):
+
+&#x20;       threading.Thread(target=self.capture\_thread, daemon=True).start()
+
+&#x20;       threading.Thread(target=self.ai\_thread, daemon=True).start()
+
+&#x20;       
+
+&#x20;       print("🚀 SMOOTH \& SYNCED FEED ACTIVE. Press 'q' to quit.")
+
+&#x20;       
+
+&#x20;       while True:
+
+&#x20;           if self.live\_frame is None: continue
+
+&#x20;           
+
+&#x20;           # THE LIVE VIDEO (Full Speed)
+
+&#x20;           canvas = self.live\_frame.copy()
+
+
+
+&#x20;           # THE BOXES (Latest available)
+
+&#x20;           if self.latest\_boxes is not None:
+
+&#x20;               boxes, labels, scores, x\_scale, y\_scale = self.latest\_boxes
+
+
+
+&#x20;               for i in range(len(scores)):
+
+&#x20;                   if scores\[i] > CONF\_THRESH:
+
+&#x20;                       b = boxes\[i]
+
+&#x20;                       x1, y1 = int(b\[0]\*x\_scale), int(b\[1]\*y\_scale)
+
+&#x20;                       x2, y2 = int(b\[2]\*x\_scale), int(b\[3]\*y\_scale)
+
+&#x20;                       
+
+&#x20;                       label\_id = int(labels\[i])
+
+&#x20;                       name = CLASS\_NAMES.get(label\_id, "Object")
+
+&#x20;                       
+
+&#x20;                       # Use a thin, bright green line for better look
+
+&#x20;                       cv2.rectangle(canvas, (x1, y1), (x2, y2), (0, 255, 0), 2)
+
+&#x20;                       cv2.putText(canvas, f"{name} {scores\[i]:.2f}", (x1, y1-8), 
+
+&#x20;                                   cv2.FONT\_HERSHEY\_SIMPLEX, 0.45, (0, 255, 0), 2)
+
+
+
+&#x20;           cv2.imshow("Capstone - Zero-Latency Optimized", canvas)
+
+&#x20;           
+
+&#x20;           # 1ms wait is enough for the UI and reduces display lag
+
+&#x20;           if cv2.waitKey(1) \& 0xFF == ord('q'):
+
+&#x20;               self.running = False
+
+&#x20;               break
+
+&#x20;       
+
+&#x20;       self.cap.release()
+
+&#x20;       cv2.destroyAllWindows()
+
+
+
+if \_\_name\_\_ == "\_\_main\_\_":
+
+&#x20;   PerfectSyncApp().run()
+
+
+
+**8. Working code for detection on video frames:**
+
+
+
+**Input: Replace the model and video frame file path before execution**
+
+**Expected Result: A Video Frame with the detected bounding boxes and labes**
+
+
+
+import torch
+
+import torchvision
+
+from PIL import Image, ImageDraw, ImageFont
+
+import torchvision.transforms.v2 as T
+
+import os
+
+import matplotlib.pyplot as plt
+
+
+
+print("--- Preparing for Live Demo ---")
+
+
+
+\# ==============================================================================
+
+\# 1. DEFINE ALL NECESSARY HELPER FUNCTIONS
+
+\# ==============================================================================
+
+print("Defining helper functions...")
+
+
+
+def get\_transform():
+
+&#x20;   """Defines the data transforms for a single image."""
+
+&#x20;   return T.Compose(\[
+
+&#x20;       T.Resize((360, 640)), 
+
+&#x20;       T.PILToTensor(), 
+
+&#x20;       T.ToDtype(torch.float32, scale=True)
+
+&#x20;   ])
+
+
+
+def get\_model(num\_classes):
+
+&#x20;   """Defines and returns the Faster R-CNN model architecture with the ImportError fixed."""
+
+&#x20;   # --- THIS IS THE PERMANENT FIX ---
+
+&#x20;   from torchvision.models.detection import FasterRCNN\_ResNet50\_FPN\_Weights
+
+&#x20;   from torchvision.models.detection.faster\_rcnn import FastRCNNPredictor
+
+&#x20;   # --- END OF FIX ---
+
+&#x20;   
+
+&#x20;   model = torchvision.models.detection.fasterrcnn\_resnet50\_fpn(weights=None) # weights=None is faster as it doesn't download
+
+&#x20;   in\_features = model.roi\_heads.box\_predictor.cls\_score.in\_features
+
+&#x20;   model.roi\_heads.box\_predictor = FastRCNNPredictor(in\_features, num\_classes)
+
+&#x20;   return model
+
+
+
+\# This dictionary maps the model's output index to a human-readable class name
+
+CLASS\_NAMES = {1:'car',2:'bus',3:'person',4:'bike',5:'truck',6:'motor',7:'train',8:'rider',9:'traffic sign',10:'traffic light'}
+
+print("Definitions complete.")
+
+
+
+\# ==============================================================================
+
+\# 2. LOAD YOUR TRAINED MODEL INTO MEMORY
+
+\# ==============================================================================
+
+\# <<< ACTION REQUIRED >>> Update these with your final model dataset name and filename
+
+MODEL\_DATASET\_FOLDER = 'bdd100k-fasterrcnn-v4' 
+
+MODEL\_FILENAME = 'fasterrcnn\_curriculum\_final.pth'
+
+MODEL\_PATH = f'/kaggle/input/{MODEL\_DATASET\_FOLDER}/{MODEL\_FILENAME}'
+
+
+
+device = torch.device('cuda') if torch.cuda.is\_available() else torch.device('cpu')
+
+print(f"Using device: {device}")
+
+
+
+if not os.path.exists(MODEL\_PATH):
+
+&#x20;   print(f"❌ ERROR: Model file not found at '{MODEL\_PATH}'! Please check the path.")
+
+else:
+
+&#x20;   print("Loading your trained model into memory... This may take a moment.")
+
+&#x20;   # Load the model and keep it in a global variable for the next cell to use
+
+&#x20;   model = get\_model(num\_classes=11)
+
+&#x20;   model.load\_state\_dict(torch.load(MODEL\_PATH, map\_location=device))
+
+&#x20;   model.to(device)
+
+&#x20;   model.eval()
+
+&#x20;   print("\\n✅ SETUP COMPLETE. The model is loaded and ready.")
+
+&#x20;   print("You can now proceed to the next cell for the live demonstration.")
+
+
+
+&#x20;==============================================================================
+
+\# CELL 2: LIVE DEMO SCRIPT (RUN THIS DURING YOUR REVIEW)
+
+\# ==============================================================================
+
+from PIL import Image, ImageDraw, ImageFont
+
+import torch
+
+import os
+
+import matplotlib.pyplot as plt
+
+
+
+\# --- INSTRUCTIONS ---
+
+\# 1. In the file explorer on the right, go to '/kaggle/working/' and click "Upload".
+
+\# 2. Select an image from your computer.
+
+\# 3. Update the 'IMAGE\_FILENAME' variable below with your file's exact name.
+
+\# 4. Run this cell!
+
+\# --------------------
+
+
+
+\# <<< ACTION REQUIRED >>> Update this with the name of the image you just uploaded.
+
+IMAGE\_FILENAME = "testr1.jpg" 
+
+
+
+\# --- Configuration ---
+
+CONFIDENCE\_THRESHOLD = 0.6
+
+
+
+\# --- Main Inference Logic ---
+
+IMAGE\_PATH = f'/kaggle/input/testlive/{IMAGE\_FILENAME}'
+
+
+
+if 'model' not in globals():
+
+&#x20;   print("❌ ERROR: Model is not loaded. Please run the setup cell (Cell 1) first!")
+
+elif not os.path.exists(IMAGE\_PATH):
+
+&#x20;   print(f"❌ ERROR: Image file not found at '{IMAGE\_PATH}'")
+
+&#x20;   print("Please make sure you have uploaded the file and the filename is spelled correctly.")
+
+else:
+
+&#x20;   print(f"--- Processing image: {IMAGE\_FILENAME} ---")
+
+&#x20;   
+
+&#x20;   with torch.no\_grad():
+
+&#x20;       image\_pil = Image.open(IMAGE\_PATH).convert("RGB")
+
+&#x20;       
+
+&#x20;       # Apply the pre-defined transform
+
+&#x20;       image\_tensor = get\_transform()(image\_pil).to(device)
+
+&#x20;       
+
+&#x20;       # Get the prediction from the pre-loaded model
+
+&#x20;       prediction = model(\[image\_tensor])\[0]
+
+&#x20;       
+
+&#x20;       draw = ImageDraw.Draw(image\_pil)
+
+&#x20;       try: font = ImageFont.truetype("arial.ttf", 20)
+
+&#x20;       except IOError: font = ImageFont.load\_default()
+
+&#x20;           
+
+&#x20;       detection\_count = 0
+
+&#x20;       for box, label, score in zip(prediction\['boxes'], prediction\['labels'], prediction\['scores']):
+
+&#x20;           if score > CONFIDENCE\_THRESHOLD:
+
+&#x20;               # Scale the box from the resized tensor size back to the original image size
+
+&#x20;               box\_np = box.cpu().numpy()
+
+&#x20;               original\_w, original\_h = image\_pil.size
+
+&#x20;               x\_scale, y\_scale = original\_w / 640, original\_h / 360
+
+&#x20;               x1,y1,x2,y2 = int(box\_np\[0]\*x\_scale), int(box\_np\[1]\*y\_scale), int(box\_np\[2]\*x\_scale), int(box\_np\[3]\*y\_scale)
+
+&#x20;               class\_name = CLASS\_NAMES.get(label.cpu().item(), 'Unknown')
+
+&#x20;               
+
+&#x20;               draw.rectangle(\[(x1, y1), (x2, y2)], outline="lime", width=3)
+
+&#x20;               draw.text((x1, y1 - 20), f"{class\_name}: {score:.2f}", fill="lime", font=font)
+
+&#x20;               #print(f"  > Detected '{class\_name}' with confidence {score:.2f}")
+
+&#x20;               detection\_count += 1
+
+&#x20;       
+
+&#x20;       #print(f"\\nFound {detection\_count} objects with confidence > {CONFIDENCE\_THRESHOLD}.")
+
+&#x20;       
+
+&#x20;       plt.figure(figsize=(16, 10))
+
+&#x20;       plt.imshow(image\_pil)
+
+&#x20;       plt.axis('off')
+
+&#x20;       plt.show()
+
+9. Working Code for detection on Pre-Recorded Video:
+
+# Note: Replace the correct model Path and Video file path before executing
+
+# ==============================================================================
+# FINAL, SELF-CONTAINED SCRIPT FOR VIDEO INFERENCE DEMONSTRATION
+# This script will load your best model and process a sample video.
+# ==============================================================================
+import torch
+import torchvision
+from PIL import Image
+import torchvision.transforms.v2 as T
+import os
+import cv2 # OpenCV library for video processing
+print("--- All necessary libraries imported. ---")
+
+# ==============================================================================
+# STEP 1: DEFINE ALL NECESSARY HELPER FUNCTIONS
+# These are required to build the model architecture and process the video frames.
+# ==============================================================================
+print("Defining helper functions...")
+
+def get_transform(train):
+    """
+    Defines the data transforms. Must be IDENTICAL to the one used for training.
+    """
+    return T.Compose([
+        T.Resize((360, 640)), 
+        T.PILToTensor(), 
+        T.ToDtype(torch.float32, scale=True)
+    ])
+
+def get_model(num_classes):
+    """
+    Builds the Faster R-CNN model architecture.
+    """
+    from torchvision.models.detection import FasterRCNN_ResNet50_FPN_Weights
+    from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
+    
+    # Load the pre-trained model structure
+    model = torchvision.models.detection.fasterrcnn_resnet50_fpn(weights=FasterRCNN_ResNet50_FPN_Weights.DEFAULT)
+    
+    # Get the number of input features for the classifier
+    in_features = model.roi_heads.box_predictor.cls_score.in_features
+    
+    # Replace the pre-trained head with a new one for our number of classes
+    model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
+    return model
+
+# This dictionary maps the model's output index to a human-readable class name
+CLASS_NAMES = {
+    1: 'car', 2: 'bus', 3: 'person', 4: 'bike', 5: 'truck', 6: 'motor',
+    7: 'train', 8: 'rider', 9: 'traffic sign', 10: 'traffic light'
+}
+
+print("Definitions complete.")
+
+# ==============================================================================
+# STEP 2: MAIN VIDEO INFERENCE SCRIPT
+# ==============================================================================
+def run_video_inference():
+    # --- CONFIGURATION ---
+    # A confidence of 0.5 is a good balance between seeing many boxes and only seeing accurate ones.
+    CONFIDENCE_THRESHOLD = 0.5 
+
+    # --- Paths ---
+    # <<< ACTION REQUIRED >>> Update these with the folder and file names of your final model dataset
+    MODEL_DATASET_FOLDER = 'bdd100k-fasterrcnn-v4'  # e.g., the name you gave your uploaded dataset
+    MODEL_FILENAME = 'fasterrcnn_curriculum_final.pth' # The name of your best model file
+    
+    VIDEO_DATASET_FOLDER = 'driving-video-with-object-tracking'
+    VIDEO_FILENAME = 'bdd100k_videos_train_00/bdd100k/videos/train/0000f77c-6257be58.mov'
+
+    MODEL_PATH = f'/kaggle/input/{MODEL_DATASET_FOLDER}/{MODEL_FILENAME}'
+    VIDEO_PATH = f'/kaggle/input/{VIDEO_DATASET_FOLDER}/{VIDEO_FILENAME}'
+    OUTPUT_VIDEO_PATH = '/kaggle/working/output_video_final.mp4'
+    # ---------------------
+
+    # --- Verification ---
+    if not os.path.exists(MODEL_PATH):
+        print(f"❌ ERROR: Model file not found at '{MODEL_PATH}'")
+        print("Please check that your 'MODEL_DATASET_FOLDER' and 'MODEL_FILENAME' variables are correct.")
+        return
+    if not os.path.exists(VIDEO_PATH):
+        print(f"❌ ERROR: Video file not found at '{VIDEO_PATH}'")
+        return
+
+    print(f"✅ Model and Video found successfully.")
+    device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+    print(f"Using device: {device}")
+
+    # --- Load Your Trained Model ---
+    print("Loading your trained model...")
+    model = get_model(num_classes=11)
+    model.load_state_dict(torch.load(MODEL_PATH, map_location=device))
+    model.to(device)
+    model.eval()
+    print("Model loaded successfully.")
+
+    # --- Process the Video Frame by Frame ---
+    cap = cv2.VideoCapture(VIDEO_PATH)
+    frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = int(cap.get(cv2.CAP_PROP_FPS))
+    
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    out = cv2.VideoWriter(OUTPUT_VIDEO_PATH, fourcc, fps, (frame_width, frame_height))
+    
+    frame_count = 0
+    print(f"\n--- Starting to process video: {os.path.basename(VIDEO_PATH)} ---")
+    
+    @torch.inference_mode()
+    def process_frame(frame):
+        # Convert frame from OpenCV (BGR) to PIL (RGB)
+        image_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        image_pil = Image.fromarray(image_rgb)
+        
+        # Apply the same transforms as validation
+        image_tensor = get_transform(train=False)(image_pil)
+        image_tensor = image_tensor.to(device)
+        
+        # Get model prediction
+        prediction = model([image_tensor])[0]
+        
+        # Draw boxes on the original frame
+        for box, label, score in zip(prediction['boxes'], prediction['labels'], prediction['scores']):
+            if score > CONFIDENCE_THRESHOLD:
+                # Scale the box from the resized tensor size back to the original frame size
+                box = box.cpu().numpy().astype(int)
+                resized_h, resized_w = 360, 640
+                x_scale = frame_width / resized_w
+                y_scale = frame_height / resized_h
+                
+                x1, y1, x2, y2 = box
+                x1, y1 = int(x1 * x_scale), int(y1 * y_scale)
+                x2, y2 = int(x2 * x_scale), int(y2 * y_scale)
+                
+                class_name = CLASS_NAMES.get(label.cpu().item(), 'Unknown')
+                
+                # Draw rectangle and text using OpenCV
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                cv2.putText(frame, f"{class_name}: {score:.2f}", (x1, y1 - 10), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+        return frame
+
+    # Loop through the video
+    while(cap.isOpened()):
+        ret, frame = cap.read()
+        if ret:
+            processed_frame = process_frame(frame)
+            out.write(processed_frame)
+            frame_count += 1
+            if frame_count % 30 == 0:
+                print(f"  > Processed {frame_count} frames...")
+        else:
+            break
+            
+    # Release everything
+    cap.release()
+    out.release()
+    
+    print(f"\n--- FINISHED ---")
+    print(f"Processed {frame_count} frames in total.")
+    print(f"✅ Output video saved to: {OUTPUT_VIDEO_PATH}")
+    print("You can now download this file from the '/kaggle/working/' directory in the right-hand menu.")
+
+# Run the main function
+if __name__ == '__main__':
+    run_video_inference()
